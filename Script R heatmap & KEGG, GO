@@ -1,0 +1,296 @@
+# ======================================================================
+# SCRIPT ANALISIS DEG GSE5281 - HEATMAP DAN ENRICHMENT
+# (Versi sederhana - cocok untuk tugas)
+# ======================================================================
+
+# 1. LOAD PACKAGES ====================================================
+
+library(GEOquery)
+library(limma)
+library(ggplot2)
+library(pheatmap)
+library(RColorBrewer)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(enrichplot)
+library(DOSE)
+library(dplyr)
+
+# 2. DOWNLOAD DATA ====================================================
+
+# Download data dari GEO
+gse <- getGEO("GSE5281", GSEMatrix = TRUE)
+
+# Ambil data expression dan phenotype
+exprs <- exprs(gse[[1]])
+pdata <- pData(gse[[1]])
+
+# Lihat struktur data
+head(pdata[,1:5])
+
+# 3. MEMBUAT KELOMPOK =================================================
+
+# Biasanya grouping dari kolom title
+pdata$group <- ifelse(grepl("ALZ", pdata$title), "Alzheimer", "Control")
+pdata$tissue <- ifelse(grepl("HIP", pdata$title), "Hippocampus", "EC")
+
+table(pdata$group, pdata$tissue)
+
+# 4. ANALISIS DEG DENGAN LIMMA ========================================
+
+# Buat desain matrix
+group <- factor(pdata$group, levels = c("Control", "Alzheimer"))
+design <- model.matrix(~ group)
+
+# Fit model
+fit <- lmFit(exprs, design)
+fit <- eBayes(fit)
+
+# Ambil hasil semua gen
+results <- topTable(fit, coef = 2, number = Inf, adjust = "fdr")
+
+# Filter gen signifikan (p.adj < 0.05 dan |logFC| > 1)
+sig_genes <- results[results$adj.P.Val < 0.05 & abs(results$logFC) > 1, ]
+
+# Lihat jumlah
+nrow(sig_genes)
+table(sig_genes$logFC > 0)  # TRUE = upregulated, FALSE = downregulated
+
+# Simpan hasil
+write.csv(results, "DEG_results_all.csv")
+write.csv(sig_genes, "DEG_results_significant.csv")
+
+# 5. HEATMAP 50 GEN TERATAS ===========================================
+
+# Ambil 50 gen dengan p-value terkecil
+top50 <- rownames(results[order(results$P.Value), ][1:50, ])
+
+# Ambil data expression untuk 50 gen tersebut
+heatmap_data <- exprs[top50, ]
+
+# Buat annotation untuk sample
+annotation_col <- data.frame(
+  Group = pdata$group,
+  Tissue = pdata$tissue
+)
+rownames(annotation_col) <- colnames(heatmap_data)
+
+# Warna annotation
+anno_colors <- list(
+  Group = c(Control = "blue", Alzheimer = "red"),
+  Tissue = c(Hippocampus = "green", EC = "orange")
+)
+
+# Buat heatmap
+pdf("heatmap_top50_DEGs.pdf", width = 10, height = 8)
+pheatmap(heatmap_data,
+         annotation_col = annotation_col,
+         annotation_colors = anno_colors,
+         scale = "row",
+         clustering_distance_rows = "euclidean",
+         clustering_distance_cols = "euclidean",
+         show_rownames = TRUE,
+         show_colnames = FALSE,
+         fontsize_row = 6,
+         color = colorRampPalette(c("blue", "white", "red"))(100),
+         main = "Top 50 DEGs Alzheimer vs Control")
+dev.off()
+
+# PNG version untuk laporan
+png("heatmap_top50_DEGs.png", width = 10, height = 8, units = "in", res = 300)
+pheatmap(heatmap_data,
+         annotation_col = annotation_col,
+         annotation_colors = anno_colors,
+         scale = "row",
+         clustering_distance_rows = "euclidean",
+         clustering_distance_cols = "euclidean",
+         show_rownames = TRUE,
+         show_colnames = FALSE,
+         fontsize_row = 6,
+         color = colorRampPalette(c("blue", "white", "red"))(100),
+         main = "Top 50 DEGs Alzheimer vs Control")
+dev.off()
+
+# 6. PREPARASI UNTUK ENRICHMENT =======================================
+
+# Ambil gene symbols dari rownames
+genes <- rownames(sig_genes)
+
+# Konversi ke Entrez ID
+gene_entrez <- bitr(genes, 
+                    fromType = "SYMBOL", 
+                    toType = "ENTREZID", 
+                    OrgDb = org.Hs.eg.db)
+
+# Gabungkan dengan logFC
+sig_genes_df <- data.frame(
+  SYMBOL = rownames(sig_genes),
+  logFC = sig_genes$logFC,
+  adj.P.Val = sig_genes$adj.P.Val
+)
+
+sig_genes_entrez <- merge(sig_genes_df, gene_entrez, by = "SYMBOL")
+
+# Pisahkan up dan down
+up_genes <- sig_genes_entrez$ENTREZID[sig_genes_entrez$logFC > 0]
+down_genes <- sig_genes_entrez$ENTREZID[sig_genes_entrez$logFC < 0]
+
+# 7. ANALISIS GENE ONTOLOGY ===========================================
+
+print("Running GO enrichment...")
+
+# GO untuk semua gen
+go_all <- enrichGO(gene = sig_genes_entrez$ENTREZID,
+                   OrgDb = org.Hs.eg.db,
+                   ont = "BP",
+                   pAdjustMethod = "fdr",
+                   pvalueCutoff = 0.05,
+                   qvalueCutoff = 0.05,
+                   readable = TRUE)
+
+# GO untuk upregulated
+go_up <- enrichGO(gene = up_genes,
+                  OrgDb = org.Hs.eg.db,
+                  ont = "BP",
+                  pAdjustMethod = "fdr",
+                  pvalueCutoff = 0.05,
+                  qvalueCutoff = 0.05,
+                  readable = TRUE)
+
+# GO untuk downregulated
+go_down <- enrichGO(gene = down_genes,
+                    OrgDb = org.Hs.eg.db,
+                    ont = "BP",
+                    pAdjustMethod = "fdr",
+                    pvalueCutoff = 0.05,
+                    qvalueCutoff = 0.05,
+                    readable = TRUE)
+
+# Simpan hasil GO
+write.csv(go_all@result, "GO_results_all.csv", row.names = FALSE)
+write.csv(go_up@result, "GO_results_up.csv", row.names = FALSE)
+write.csv(go_down@result, "GO_results_down.csv", row.names = FALSE)
+
+# 8. VISUALISASI GO ===================================================
+
+# Dotplot GO
+pdf("GO_dotplot_all.pdf", width = 10, height = 8)
+dotplot(go_all, showCategory = 20, title = "GO Enrichment - All Genes")
+dev.off()
+
+pdf("GO_dotplot_up.pdf", width = 10, height = 8)
+if(nrow(go_up@result) > 0) dotplot(go_up, showCategory = 20, title = "GO Enrichment - Upregulated Genes")
+dev.off()
+
+pdf("GO_dotplot_down.pdf", width = 10, height = 8)
+if(nrow(go_down@result) > 0) dotplot(go_down, showCategory = 20, title = "GO Enrichment - Downregulated Genes")
+dev.off()
+
+# Barplot GO
+pdf("GO_barplot_all.pdf", width = 10, height = 8)
+barplot(go_all, showCategory = 20, title = "GO Enrichment - All Genes")
+dev.off()
+
+# 9. ANALISIS KEGG ====================================================
+
+print("Running KEGG enrichment...")
+
+# KEGG untuk semua gen
+kegg_all <- enrichKEGG(gene = sig_genes_entrez$ENTREZID,
+                       organism = "hsa",
+                       pAdjustMethod = "fdr",
+                       pvalueCutoff = 0.05)
+
+# KEGG untuk upregulated
+kegg_up <- enrichKEGG(gene = up_genes,
+                      organism = "hsa",
+                      pAdjustMethod = "fdr",
+                      pvalueCutoff = 0.05)
+
+# KEGG untuk downregulated
+kegg_down <- enrichKEGG(gene = down_genes,
+                        organism = "hsa",
+                        pAdjustMethod = "fdr",
+                        pvalueCutoff = 0.05)
+
+# Simpan hasil KEGG
+write.csv(kegg_all@result, "KEGG_results_all.csv", row.names = FALSE)
+write.csv(kegg_up@result, "KEGG_results_up.csv", row.names = FALSE)
+write.csv(kegg_down@result, "KEGG_results_down.csv", row.names = FALSE)
+
+# 10. VISUALISASI KEGG =================================================
+
+# Dotplot KEGG
+pdf("KEGG_dotplot_all.pdf", width = 10, height = 8)
+if(nrow(kegg_all@result) > 0) dotplot(kegg_all, showCategory = 20, title = "KEGG Enrichment - All Genes")
+dev.off()
+
+pdf("KEGG_dotplot_up.pdf", width = 10, height = 8)
+if(nrow(kegg_up@result) > 0) dotplot(kegg_up, showCategory = 20, title = "KEGG Enrichment - Upregulated Genes")
+dev.off()
+
+pdf("KEGG_dotplot_down.pdf", width = 10, height = 8)
+if(nrow(kegg_down@result) > 0) dotplot(kegg_down, showCategory = 20, title = "KEGG Enrichment - Downregulated Genes")
+dev.off()
+
+# 11. MEMBUAT TABEL KHUSUS UNTUK GO TERKAIT GAMBAR ====================
+
+# Data dari gambar Anda
+go_gambar <- data.frame(
+  Category = c(
+    "Homophilic cell adhesion via plasma membrane adhesion",
+    "Cell-cell adhesion via plasma-membrane adhesion molecules",
+    "Modulation of excitatory postsynaptic potential",
+    "Positive regulation of excitatory postsynaptic potential",
+    "Transcription elongation by RNA polymerase II",
+    "Regulation of neuron projection development",
+    "DNA-templated transcription, elongation"
+  ),
+  Count = c(41, 44, 6, 5, 6, 11, 6),
+  P_adjust = c(0.005, 0.005, 0.02, 0.02, 0.02, 0.03, 0.03)
+)
+
+# Simpan tabel
+write.csv(go_gambar, "GO_table_from_image.csv", row.names = FALSE)
+
+# Buat barplot sesuai gambar
+pdf("GO_barplot_manual.pdf", width = 12, height = 7)
+par(mar = c(5, 15, 4, 2))  # Margin kiri lebih lebar untuk label panjang
+
+# Urutkan berdasarkan Count
+go_gambar <- go_gambar[order(go_gambar$Count), ]
+
+# Buat barplot horizontal
+bp <- barplot(go_gambar$Count,
+              names.arg = go_gambar$Category,
+              horiz = TRUE,
+              las = 1,
+              xlab = "Number of Genes (Count)",
+              main = "GO Biological Processes Enrichment",
+              col = ifelse(go_gambar$P_adjust < 0.01, "darkred",
+                          ifelse(go_gambar$P_adjust < 0.02, "red", "salmon")),
+              xlim = c(0, 50))
+
+# Tambah label count
+text(x = go_gambar$Count, y = bp, 
+     labels = go_gambar$Count, 
+     pos = 4, cex = 0.8)
+
+# Tambah legend untuk p.adjust
+legend("bottomright", 
+       legend = c("p.adjust < 0.01", "p.adjust < 0.02", "p.adjust < 0.03"),
+       fill = c("darkred", "red", "salmon"),
+       title = "Significance")
+
+dev.off()
+
+# 12. SESSION INFO =====================================================
+
+sink("session_info.txt")
+sessionInfo()
+sink()
+
+print("ANALISIS SELESAI!")
+print(paste("Total gen signifikan:", nrow(sig_genes)))
+print(paste("Upregulated:", sum(sig_genes$logFC > 0)))
+print(paste("Downregulated:", sum(sig_genes$logFC < 0)))
